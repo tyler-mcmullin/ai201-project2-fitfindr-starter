@@ -18,7 +18,8 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import search_listings, suggest_outfit, create_fit_card, _get_groq_client
+import re
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -93,8 +94,66 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     of planning.md — your implementation should match what you described there.
     """
     # TODO: implement the planning loop
+
+    # 1) Initialize Session
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # 2) Parse Query
+    # Regex Parsing
+    # Size
+    size_match = re.search(
+        r'\b(xs|s|m|l|xl|xxl|small|medium|large|extra\s*large|W\d{2}\s*L\d{2})\b',
+        query, re.IGNORECASE
+    )
+
+    # Max Price
+    price_match = re.search(r'\$?\b(\d+(?:\.\d{1,2})?)\b', query)
+
+    # LLM Parsing
+    # Description
+    client = _get_groq_client()
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Extract only the item description from this shopping query — "
+                f"no size, no price, no filler words. Reply with the description only, "
+                f"nothing else.\n\nQuery: {query}"
+            )
+        }]
+    )
+    description = response.choices[0].message.content.strip() or None
+
+    # Store Results in session["parsed"]
+    session["parsed"] = {
+        "description": response.choices[0].message.content.strip() or None,
+        "size": size_match.group(0) if size_match else None,
+        "max_price": float(price_match.group(1)) if price_match else None,
+    }
+
+    # Call search_listings with parsed parameters and store in session["search_results"]
+    session["search_results"] = search_listings(
+        description=session["parsed"]["description"],
+        size=session["parsed"]["size"],
+        max_price=session["parsed"]["max_price"],
+    )
+    if not session["search_results"]:
+        session["error"] = "No listings found with that description. Try broadening your search."
+        return session
+    
+    for result in session["search_results"]:
+        result["price"] = f"{result['price']:.2f}"
+    
+    # Select top result from search_results and store in session["selected_item"]
+    session["selected_item"] = session["search_results"][0]
+
+    # Call suggest_outfit using the selected item
+    session["outfit_suggestion"] = suggest_outfit(new_item=session["selected_item"], wardrobe=wardrobe)
+
+    # Create fit_card using the outfit suggestion and selected item
+    session["fit_card"] = create_fit_card(outfit=session["outfit_suggestion"], new_item=session["selected_item"])
+
     return session
 
 
